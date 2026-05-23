@@ -48,7 +48,13 @@ MODULE_TITLES = {
     "UESCA-RunBib2":  "Bibliography",
 }
 
-_BOLD_DEF   = re.compile(r'\*\*([^*:]{2,40})\*\*\s*[:—\-]\s*(.{15,200}?)(?:\.|$)', re.MULTILINE)
+# Matches BOTH formats:
+#   **Term:** definition     (colon inside bold)
+#   **Term**[: —-] definition (separator outside bold)
+_BOLD_DEF = re.compile(
+    r'\*\*([^*\n]{2,60}?):?\*\*\s*:?[-—]?\s*(.{10,280}?)(?=\n|$)',
+    re.MULTILINE
+)
 _NUMBER_FACT= re.compile(r'(?:approximately|about|roughly|between|up to|over|around)?\s*(\d+(?:[.,]\d+)?(?:\s*(?:percent|%|million|billion|km|miles|minutes?|seconds?|hours?|days?|weeks?|years?|times?|degrees?)))', re.IGNORECASE)
 _BULLET     = re.compile(r'^[-*]\s+(.+)$', re.MULTILINE)
 _HEADING    = re.compile(r'^#{1,4}\s+(.+)$', re.MULTILINE)
@@ -71,20 +77,38 @@ def extract_definition_questions(text: str, all_definitions: list) -> list:
     questions = []
     found = _BOLD_DEF.findall(text)
     for term, definition in found:
-        term       = strip_md(term).strip()
+        term       = strip_md(term).strip().rstrip(':–—-').strip()
         definition = truncate(definition)
         if len(term) < 2 or len(definition) < 10: continue
-        # Distractors = 3 other definitions from the pool
-        other_defs = [d for t, d in all_definitions if t != term and len(d) > 10]
-        if len(other_defs) < 3: continue
+        # Skip low-quality entries
+        if term.endswith('?') or '\n' in term: continue
+        if definition.strip().startswith('http'): continue
+        if 'http' in term: continue
+        if len(term.split()) > 7: continue   # term too long = sentence, not a term
+
+        other_defs  = [d for t, d in all_definitions if t.lower() != term.lower() and len(d) > 10]
+        other_terms = [t for t, d in all_definitions if t.lower() != term.lower() and len(t) > 1]
+        if len(other_defs) < 3 or len(other_terms) < 3: continue
+
+        # Q1: term → definition  ("What does X mean?")
         distractors = random.sample(other_defs, 3)
-        options = [definition] + [truncate(d) for d in distractors]
-        random.shuffle(options)
-        correct = options.index(definition)
+        opts = [definition] + [truncate(d) for d in distractors]
+        random.shuffle(opts)
         questions.append({
-            "q":       f'What is the definition of "{term}"?',
-            "options": options,
-            "correct": correct,
+            "q":       f'What is the correct definition of "{term}"?',
+            "options": opts,
+            "correct": opts.index(definition),
+            "hint":    f'{term}: {definition}'
+        })
+
+        # Q2: definition → term  ("Which term is described as: …?")
+        wrong_terms = random.sample(other_terms, 3)
+        opts2 = [term] + wrong_terms
+        random.shuffle(opts2)
+        questions.append({
+            "q":       f'Which term is described as: "{definition}"?',
+            "options": opts2,
+            "correct": opts2.index(term),
             "hint":    f'{term}: {definition}'
         })
     return questions
@@ -219,9 +243,13 @@ def main():
     for md in sorted(ENGLISH_DIR.glob("*.md")):
         text = md.read_text(encoding="utf-8")
         for term, defn in _BOLD_DEF.findall(text):
-            term = strip_md(term).strip()
+            term = strip_md(term).strip().rstrip(':–—-').strip()
             defn = truncate(defn)
-            if len(term) >= 2 and len(defn) >= 10:
+            if (len(term) >= 2 and len(defn) >= 10
+                and not term.endswith('?')
+                and not defn.strip().startswith('http')
+                and 'http' not in term
+                and len(term.split()) <= 7):     # skip sentence-length "terms"
                 all_definitions.append((term, defn))
 
     print(f"Collected {len(all_definitions)} definitions from all modules\n")
@@ -236,7 +264,7 @@ def main():
         qs = []
         qs += extract_definition_questions(text, all_definitions)
         qs += extract_fact_questions(text)
-        qs += extract_list_questions(text)
+        # List/NOT questions removed — too ambiguous
 
         # Deduplicate by question text
         seen  = set()
@@ -250,8 +278,6 @@ def main():
         if dedup:
             questions_by_module[title] = dedup
             print(f"  {title}: {len(dedup)} questions")
-
-    resolve_fakes(questions_by_module)
 
     # Write quiz_data.js
     Path("content").mkdir(exist_ok=True)
